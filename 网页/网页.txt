@@ -1,0 +1,418 @@
+// ==UserScript==
+// @name         Google Translate Automation with Proxy and Save
+// @namespace    http://tampermonkey.net/
+// @version      2.24
+// @description  Automatically translate and input text using Google API via Tampermonkey, then save the translation if necessary
+// @author       Your Name
+// @match        *://*/*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    window.addEventListener('load', function () {
+        createUI();
+    });
+
+    const supportedLanguages = [
+			'ar', 'hr', 'cs', 'en', 'fr', 'de', 'hi', 'hu', 'id', 'ja', 'lt', 'fa', 'pl',
+			'pt-br', 'ro', 'ru', 'es', 'th', 'tr', 'uz', 'vi'
+    ];
+
+    const languageCodeMap = {
+		'ar': 'ar',
+		'hr': 'hr',
+		'cs': 'cs',
+		'en': 'en',
+		'fr': 'fr',
+		'de': 'de',
+		'hi': 'hi',
+		'hu': 'hu',
+		'id': 'id',
+		'ja': 'ja',
+		  'lt': 'lt',
+		  'fa': 'fa',
+		  'pl': 'pl',
+		  'pt-br': 'pt',
+		  'ro': 'ro',
+		  'ru': 'ru',
+		  'es': 'es',
+		  'th': 'th',
+		  'tr': 'tr',
+		  'uz': 'uz',
+		  'vi': 'vi'
+        // 其他语言代码映射
+    };
+
+    let stopExecution = false;
+    let abortController = new AbortController();
+
+    const API_KEY = 'AIzaSyBjtJYG3psVo7Eg2-2duSonBCEGP27jNqE'; // 您的Google API密钥
+    const API_URL = `https://translation.googleapis.com/language/translate/v2?key=${API_KEY}`;
+
+    function createUI() {
+        const startButton = document.createElement('button');
+        startButton.textContent = '开始翻译';
+        startButton.style.position = 'fixed';
+        startButton.style.top = '10px';
+        startButton.style.right = '10px';
+        startButton.style.zIndex = 1000;
+        startButton.style.padding = '10px 20px';
+        startButton.style.backgroundColor = '#007bff';
+        startButton.style.color = '#fff';
+        startButton.style.border = 'none';
+        startButton.style.borderRadius = '5px';
+        startButton.style.cursor = 'pointer';
+
+        startButton.addEventListener('click', startTranslation);
+        document.body.appendChild(startButton);
+
+        const stopButton = document.createElement('button');
+        stopButton.textContent = '停止检测';
+        stopButton.style.position = 'fixed';
+        stopButton.style.top = '50px';
+        stopButton.style.right = '10px';
+        stopButton.style.zIndex = 1000;
+        stopButton.style.padding = '10px 20px';
+        stopButton.style.backgroundColor = '#ff4c4c';
+        stopButton.style.color = '#fff';
+        stopButton.style.border = 'none';
+        stopButton.style.borderRadius = '5px';
+        stopButton.style.cursor = 'pointer';
+
+        stopButton.addEventListener('click', () => {
+            stopExecution = true;
+            abortController.abort(); // 中止所有正在进行的请求
+            abortController = new AbortController(); // 重置AbortController以便后续使用
+            updateStatus('检测已停止');
+        });
+        document.body.appendChild(stopButton);
+
+        const clearButton = document.createElement('button');
+        clearButton.textContent = '清除已翻译索引';
+        clearButton.style.position = 'fixed';
+        clearButton.style.top = '90px';
+        clearButton.style.right = '10px';
+        clearButton.style.zIndex = 1000;
+        clearButton.style.padding = '10px 20px';
+        clearButton.style.backgroundColor = '#ffa500';
+        clearButton.style.color = '#fff';
+        clearButton.style.border = 'none';
+        clearButton.style.borderRadius = '5px';
+        clearButton.style.cursor = 'pointer';
+
+        clearButton.addEventListener('click', () => {
+            sessionStorage.removeItem('translatedIndexes');
+            updateStatus('已清除所有已翻译索引');
+            updateTranslatedIndexDisplay();
+        });
+        document.body.appendChild(clearButton);
+
+        const translatedIndexDisplay = document.createElement('div');
+        translatedIndexDisplay.id = 'translated-index-display';
+        translatedIndexDisplay.style.position = 'fixed';
+        translatedIndexDisplay.style.top = '130px';
+        translatedIndexDisplay.style.right = '10px';
+        translatedIndexDisplay.style.zIndex = 1000;
+        translatedIndexDisplay.style.padding = '10px 20px';
+        translatedIndexDisplay.style.backgroundColor = '#fff';
+        translatedIndexDisplay.style.border = '1px solid #ddd';
+        translatedIndexDisplay.style.borderRadius = '5px';
+        translatedIndexDisplay.style.maxWidth = '300px';
+        translatedIndexDisplay.style.overflowY = 'auto';
+        document.body.appendChild(translatedIndexDisplay);
+        updateTranslatedIndexDisplay();
+
+        const statusDiv = document.createElement('div');
+        statusDiv.id = 'script-status';
+        statusDiv.style.position = 'fixed';
+        statusDiv.style.top = '190px';
+        statusDiv.style.right = '10px';
+        statusDiv.style.zIndex = 1000;
+        statusDiv.style.padding = '10px 20px';
+        statusDiv.style.backgroundColor = '#fff';
+        statusDiv.style.border = '1px solid #ddd';
+        statusDiv.style.borderRadius = '5px';
+        statusDiv.style.maxWidth = '300px';
+        statusDiv.style.overflowY = 'auto';
+        document.body.appendChild(statusDiv);
+    }
+
+    function updateTranslatedIndexDisplay() {
+        const translatedIndexes = getTranslatedIndexes();
+        const displayDiv = document.getElementById('translated-index-display');
+        if (displayDiv) {
+            displayDiv.innerHTML = `已翻译索引: ${translatedIndexes.length > 0 ? translatedIndexes.join(', ') : '无'}`;
+        }
+    }
+
+    function updateStatus(message) {
+        const statusDiv = document.getElementById('script-status');
+        if (statusDiv) {
+            const timestamp = new Date().toLocaleTimeString();
+            const statusMessage = document.createElement('p');
+            statusMessage.innerHTML = `[${timestamp}] ${message}`;
+            statusDiv.prepend(statusMessage);
+
+            // 滚动到顶部以显示最新的状态消息
+            statusDiv.scrollTop = 0;
+
+            // 自动隐藏旧的状态消息
+            setTimeout(() => {
+                statusMessage.remove();
+            }, 5000);
+        }
+    }
+
+    function getLanguages() {
+        let originalLang = null;
+        let translationLang = null;
+
+        document.querySelectorAll('div.sc-dlWCHZ').forEach((div) => {
+            const spanText = div.querySelector('span') ? div.querySelector('span').textContent.trim() : '';
+            if (spanText === 'Original') {
+                const img = div.querySelector('h5 img');
+                if (img) originalLang = img.getAttribute('alt');
+            } else if (spanText === 'Translation') {
+                const img = div.querySelector('h5 img');
+                if (img) translationLang = img.getAttribute('alt');
+            }
+        });
+
+        originalLang = languageCodeMap[originalLang] || originalLang;
+        translationLang = languageCodeMap[translationLang] || translationLang;
+
+        if (!originalLang || !translationLang || !supportedLanguages.includes(originalLang) || !supportedLanguages.includes(translationLang)) {
+            updateStatus(`检测到的语言:\n原文: ${originalLang || '未找到'}\n目标: ${translationLang || '未找到'}\n一个或两个语言不被支持。`);
+            return { originalLang: null, translationLang: null };
+        }
+
+        updateStatus(`检测到的语言: 原文: ${originalLang}, 目标: ${translationLang}`);
+        return { originalLang, translationLang };
+    }
+
+    function highlightElement(element) {
+        element.style.border = '2px solid red';
+        element.style.backgroundColor = '#ffcccc';
+        element.style.transition = 'background-color 0.5s ease';
+        setTimeout(() => clearHighlight(element), 1500);
+    }
+
+    function clearHighlight(element) {
+        element.style.border = '';
+        element.style.backgroundColor = '';
+    }
+
+    function getTranslatedIndexes() {
+        const translatedIndexes = sessionStorage.getItem('translatedIndexes');
+        return translatedIndexes ? JSON.parse(translatedIndexes) : [];
+    }
+
+    function saveTranslatedIndex(index) {
+        const translatedIndexes = getTranslatedIndexes();
+        if (!translatedIndexes.includes(index)) {
+            translatedIndexes.push(index);
+            sessionStorage.setItem('translatedIndexes', JSON.stringify(translatedIndexes));
+            updateTranslatedIndexDisplay();
+        }
+    }
+
+    async function processDataIndexElement(element, index, originalLang, translationLang) {
+        if (stopExecution) return; // 检查是否停止执行
+
+        const dataIndex = parseInt(element.getAttribute('data-index'), 10);
+        const translatedIndexes = getTranslatedIndexes();
+
+        if (translatedIndexes.includes(dataIndex)) {
+            updateStatus(`跳过已翻译的元素: data-index ${dataIndex}`);
+            return;
+        }
+
+        const statusElement = element.querySelector('.ate-tooltip-dropdown');
+        if (statusElement) {
+            const statusText = statusElement.textContent.trim();
+            updateStatus(`正在处理 data-index: ${dataIndex}，状态: ${statusText}`);
+
+            highlightElement(element);
+
+            if (statusText === 'No translation') {
+                const button = element.querySelector('button');
+                if (button) {
+                    button.click();
+                    updateStatus(`点击按钮打开编辑器，处理 data-index: ${dataIndex}`);
+                }
+            } else {
+                statusElement.click();
+                updateStatus(`点击状态元素打开编辑器，处理 data-index: ${dataIndex}`);
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            const iframe = document.querySelector('iframe[id^="tiny-react"]');
+            if (iframe) {
+                const iframeDocument = iframe.contentDocument || iframe.contentWindow.document;
+                const body = iframeDocument.querySelector('body#tinymce');
+
+                if (body) {
+                    body.innerHTML = '';
+                    updateStatus(`清空编辑器内容，处理 data-index: ${dataIndex}`);
+
+                    const originalTextDiv = element.querySelector('div.segm.AT-segment_list__original');
+                    if (originalTextDiv) {
+                        const originalText = originalTextDiv.textContent.trim();
+                        updateStatus(`提取原文: ${originalText}`);
+
+                        try {
+                            const translatedText = await translateTextWithLineBreaks(originalText, originalLang, translationLang);
+                            updateStatus(`翻译后的文本: ${translatedText}`);
+
+                            body.innerHTML = `<p>${translatedText.replace(/\n/g, '<br>')}</p>`;
+                            updateStatus(`插入翻译文本到编辑器，处理 data-index: ${dataIndex}`);
+
+                            const saveButton = document.querySelector('.AT-editor__complete_segment');
+                            if (saveButton) {
+                                saveButton.click();
+                                updateStatus(`点击保存按钮，处理 data-index: ${dataIndex}`);
+                                saveTranslatedIndex(dataIndex);
+                            } else {
+                                updateStatus(`未找到保存按钮，处理 data-index: ${dataIndex}`);
+                            }
+                        } catch (error) {
+                            updateStatus(`翻译失败，处理 data-index: ${dataIndex}: ${error}`);
+                            console.error(`翻译失败: ${error.message}`);
+                        }
+                    } else {
+                        updateStatus(`未找到原文，处理 data-index: ${dataIndex}`);
+                    }
+                } else {
+                    updateStatus(`未找到编辑器 body，处理 data-index: ${dataIndex}`);
+                }
+            } else {
+                updateStatus(`未找到 iframe 编辑器，处理 data-index: ${dataIndex}`);
+            }
+
+            clearHighlight(element);
+        } else {
+            updateStatus(`未找到状态元素，处理 data-index: ${dataIndex}`);
+        }
+    }
+
+    async function translateTextWithLineBreaks(text, fromLang, toLang) {
+        const segments = text.split('\n');
+        const translatedSegments = [];
+
+        for (let segment of segments) {
+            if (stopExecution) return ''; // 检查是否停止执行
+            if (segment.trim() === '') {
+                translatedSegments.push('');
+            } else {
+                try {
+                    const translatedSegment = await translateText(segment, fromLang, toLang);
+                    translatedSegments.push(translatedSegment);
+                } catch (error) {
+                    updateStatus(`翻译段落出错: ${error.message}`);
+                    translatedSegments.push(segment);
+                }
+            }
+        }
+
+        return translatedSegments.join('\n');
+    }
+
+    async function translateText(query, fromLang, toLang) {
+        const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                q: query,
+                source: fromLang,
+                target: toLang,
+                format: 'text'
+            }),
+            signal: abortController.signal // 使用AbortController来管理请求
+        });
+
+        if (!response.ok) {
+            updateStatus(`HTTP 错误! 状态: ${response.status}`);
+            throw new Error(`HTTP 错误! 状态: ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data && data.data && data.data.translations) {
+            return data.data.translations[0].translatedText;
+        } else {
+            updateStatus(`翻译 API 错误: ${data.error.message || '翻译失败'}`);
+            throw new Error(data.error.message || '翻译失败');
+        }
+    }
+
+    async function checkDataIndexElements(originalLang, translationLang) {
+        updateStatus('开始检测 data-index 元素...');
+        const dataIndexElements = document.querySelectorAll('[data-index]');
+        updateStatus(`找到 ${dataIndexElements.length} 个 data-index 元素`);
+
+        const translatedIndexes = getTranslatedIndexes();
+
+        for (let i = 0; i < dataIndexElements.length; i++) {
+            if (stopExecution) {
+                updateStatus('检测已停止');
+                return;
+            }
+            const element = dataIndexElements[i];
+            const dataIndex = parseInt(element.getAttribute('data-index'), 10);
+
+            if (translatedIndexes.includes(dataIndex)) {
+                continue;
+            }
+
+            await processDataIndexElement(element, i + 1, originalLang, translationLang);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+
+        updateStatus('检测完成');
+
+        await retryUntranslatedElements(originalLang, translationLang);
+    }
+
+    async function retryUntranslatedElements(originalLang, translationLang) {
+        const dataIndexElements = document.querySelectorAll('[data-index]');
+        const translatedIndexes = getTranslatedIndexes();
+        let untranslatedFound = false;
+
+        for (let i = 0; i < dataIndexElements.length; i++) {
+            if (stopExecution) {
+                updateStatus('检测已停止');
+                return;
+            }
+            const element = dataIndexElements[i];
+            const dataIndex = parseInt(element.getAttribute('data-index'), 10);
+
+            if (!translatedIndexes.includes(dataIndex)) {
+                untranslatedFound = true;
+                updateStatus(`发现未翻译的索引: ${dataIndex}，继续翻译...`);
+                await processDataIndexElement(element, i + 1, originalLang, translationLang);
+                await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+        }
+
+        if (!untranslatedFound) {
+            updateStatus('所有索引已翻译完成');
+        }
+    }
+
+    async function startTranslation() {
+        stopExecution = false;
+        abortController = new AbortController(); // 每次开始翻译时重新创建一个AbortController
+
+        const { originalLang, translationLang } = getLanguages();
+        if (!originalLang || !translationLang) {
+            return;
+        }
+
+        await checkDataIndexElements(originalLang, translationLang);
+    }
+
+})();

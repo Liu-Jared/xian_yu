@@ -1,0 +1,50 @@
+1. 导入部分
+导入了 sys 和 os 模块进行系统操作。
+导入 PyQt5 相关的库用于创建 GUI，如 QApplication, QMainWindow, QPushButton 等。
+导入 PIL 用于图像处理。
+导入 openpyxl 用于操作 Excel 文件。
+导入 zipfile, py7zr, rarfile, 和 tarfile 用于解压各种压缩文件格式（.zip, .7z, .rar, .tgz）。
+2. ImageLabel 类
+功能: 负责图像的加载、显示、标注管理以及保存功能。
+主要方法:
+load_image(): 加载图像并显示。
+set_prefix(), set_text_color(), set_text_size(): 设置标注文本的前缀、颜色和大小。
+start_drawing(), stop_drawing(): 开始和停止绘制标注。
+undo_last_annotation(): 撤销最后一个标注。
+add_annotation(): 在图像指定位置添加标注。
+set_id_text(): 设置 ID 文本。
+paintEvent(): 重绘事件，用于在图像上绘制标注。
+mousePressEvent(): 处理鼠标点击事件以添加标注。
+save_image(): 将标注后的图像保存到指定路径。
+3. ImageAnnotator 类
+功能: 主窗口，用于图像标注和操作。
+主要组件:
+界面包括按钮（打开文件/文件夹、开始/停止绘制、撤销标注、保存图片、设置颜色、设置前缀、添加 ID）。
+侧边栏展示缩略图列表，供用户选择和加载。
+主要方法:
+open_file_or_folder(), load_images_from_folder(), populate_thumbnail_list(): 处理文件和文件夹的选择和加载。
+load_image(), load_selected_image(): 加载和显示选定的图像。
+start_drawing(), stop_drawing(), undo_annotation(), save_image(): 对图像进行标注和保存。
+choose_color(), set_text_size(), set_prefix(), add_id(): 设置标注相关的属性。
+4. DecompressRenameWindow 类
+功能: 解压缩文件并对提取的图像文件重命名。
+主要方法:
+select_file(): 选择压缩文件。
+decompress_and_rename(): 解压并重命名图像文件，根据文件类型调用对应的解压函数。
+extract_zip(), extract_7z(), extract_rar(), extract_tgz(): 分别用于解压 .zip, .7z, .rar, 和 .tgz 文件。
+5. ExcelWorker 类
+功能: 将指定文件夹中的图像文件信息写入 Excel 文件，并显示进度。
+主要方法:
+run(): 执行图像文件的读取、插入 Excel、处理 Excel 样式和保存。
+6. ConvertDocWindow 类
+功能: 用户界面，用于选择文件夹并生成包含图像信息的 Excel 文件。
+主要方法:
+select_folder(): 选择包含图像的文件夹。
+start_conversion(): 开始生成 Excel 文件，并通过 ExcelWorker 类进行处理。
+update_progress(), show_finished(), show_error(): 用于更新进度条和显示完成或错误信息。
+7. MainWindow 类
+功能: 主界面窗口，包含三个按钮：解压改名、绘制文字和转换文档。每个按钮打开对应的功能窗口。
+主要方法:
+open_decompress_window(), open_draw_text_window(), open_convert_doc_window(): 打开相应的子窗口。
+8. main() 函数
+功能: 应用程序的入口，创建并显示主窗口，并启动应用程序的事件循环。
