@@ -1,27 +1,33 @@
 import sys
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, 
-    QFileDialog, QMessageBox, QLabel, QScrollArea, QListWidget, QListWidgetItem, 
+    QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, QWidget,
+    QFileDialog, QMessageBox, QLabel, QScrollArea, QListWidget, QListWidgetItem,
     QColorDialog, QSpinBox, QLineEdit, QInputDialog, QGroupBox, QGridLayout,
     QStatusBar
 )
-from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QIcon
-from PyQt5.QtCore import Qt, QPoint, QSize
+from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QIcon, QTransform
+from PyQt5.QtCore import Qt, QPoint, QSize, QRect, pyqtSignal, QPointF
 import os
+import math
+
 
 class ImageLabel(QLabel):
+    annotations_changed = pyqtSignal()  # 信号，用于通知主窗口更新标注列表
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pixmap = None
-        self.annotations = []  # 存储 (text, position, type) 三元组
+        self.original_pixmap = None  # 保存原始图片，用于旋转和裁剪
+        self.annotations = []  # 存储 (id, text, position, type, color) 五元组
         self.prefix = "BR"
         self.index = 1
-        self.text_color = QColor(0, 0, 0)
+        self.current_annotation_color = QColor(0, 0, 0)  # 当前标注颜色
         self.text_size = 20
         self.id_text = ""
         self.id_position = None  # 存储ID绘制的位置
         self.id_text_size = 20  # ID字体大小
         self.id_color = QColor(0, 0, 0)  # ID颜色
+        self.id_annotation = None  # 存储ID标注
 
         # 固定水平绘制相关变量
         self.fixed_y_mode = False
@@ -31,37 +37,64 @@ class ImageLabel(QLabel):
 
         # 增加标志位用于区分绘制模式
         self.is_id_mode = False  # 是否为ID绘制模式
+        self.is_cropping = False  # 是否处于裁剪模式
+        self.is_rotating = False  # 是否处于旋转模式
+
+        # 标注ID计数器
+        self.annotation_id_counter = 0
+
+        # 裁剪相关
+        self.crop_rect = QRect()
+        self.start_crop_pos = None
+
+        # 旋转相关
+        self.rotation_angle = 0  # 总旋转角度
+        self.start_rotation_angle = 0  # 开始旋转时的角度
+        self.rotation_center = QPointF()
+        self.last_mouse_pos = QPointF()
+
+        # 启用鼠标跟踪
+        self.setMouseTracking(True)
 
     def load_image(self, image_path):
         self.pixmap = QPixmap(image_path)
+        self.original_pixmap = QPixmap(image_path)
         if self.pixmap.isNull():
             QMessageBox.critical(self, "加载图片失败", f"无法加载图片: {image_path}")
         else:
             self.annotations.clear()
             self.index = 1
             self.id_position = None
+            self.id_annotation = None
             self.fixed_y_position = None
             self.fixed_y_mark_position = None
             self.is_fixed_y_confirmed = False
             self.is_id_mode = False  # 重置ID模式
+            self.is_cropping = False
+            self.is_rotating = False
+            self.crop_rect = QRect()
+            self.rotation_angle = 0
             self.repaint()
+            self.annotations_changed.emit()
 
     def set_prefix(self, prefix):
         self.prefix = prefix
 
-    def set_text_color(self, color):
-        self.text_color = color
+    def set_current_annotation_color(self, color):
+        self.current_annotation_color = color
 
     def set_text_size(self, size):
         self.text_size = size
+        self.repaint()  # 即时更新字体大小
 
     def set_id_text(self, id_text):
-        self.id_text = id_text
+        self.id_text = "ID:" + id_text
         self.repaint()
 
     def set_id_text_size(self, size):
         """设置ID字体大小"""
         self.id_text_size = size
+        self.repaint()  # 即时更新ID字体大小
 
     def set_id_color(self, color):
         """设置ID颜色"""
@@ -70,25 +103,50 @@ class ImageLabel(QLabel):
     def undo_last_annotation(self):
         if self.annotations:
             last_annotation = self.annotations.pop()
-            if last_annotation[2] == 'normal':
+            if last_annotation[3] == 'normal':
                 self.index -= 1
             self.repaint()
+            self.annotations_changed.emit()
 
     def add_annotation(self, position, annotation_type='normal'):
         if annotation_type == 'normal':
             annotation_text = f"{self.prefix}{str(self.index).zfill(2)}"
             self.index += 1
+            # 使用固定Y坐标
+            if self.fixed_y_mode and self.fixed_y_position is not None:
+                position.setY(self.fixed_y_position)
+            # 应用旋转和缩放变换
+            transformed_pos = self.transform_point(position)
+            # 分配唯一ID
+            annotation_id = self.annotation_id_counter
+            self.annotation_id_counter += 1
+            self.annotations.append((annotation_id, annotation_text, transformed_pos, annotation_type, self.current_annotation_color))
         elif annotation_type == 'id':
             annotation_text = self.id_text
+            self.id_position = position
+            self.id_annotation = (annotation_text, position)
         else:
             annotation_text = "Unknown"
-
-        # 根据模式确定是否使用固定Y轴坐标
-        if self.fixed_y_mode and self.fixed_y_position is not None and annotation_type == 'normal':
-            position.setY(self.fixed_y_position)
-
-        self.annotations.append((annotation_text, position, annotation_type))
+        self.annotations_changed.emit()
         self.repaint()
+
+    def transform_point(self, point):
+        """将点应用当前的旋转变换"""
+        transform = QTransform()
+        center = QPointF(self.pixmap.width() / 2, self.pixmap.height() / 2)
+        transform.translate(center.x(), center.y())
+        transform.rotate(-self.rotation_angle)
+        transform.translate(-center.x(), -center.y())
+        return transform.map(point)
+
+    def inverse_transform_point(self, point):
+        """将点应用逆旋转变换"""
+        transform = QTransform()
+        center = QPointF(self.pixmap.width() / 2, self.pixmap.height() / 2)
+        transform.translate(center.x(), center.y())
+        transform.rotate(self.rotation_angle)
+        transform.translate(-center.x(), -center.y())
+        return transform.map(point)
 
     def set_fixed_y_mode(self, mode: bool):
         self.fixed_y_mode = mode
@@ -107,6 +165,56 @@ class ImageLabel(QLabel):
             self.is_fixed_y_confirmed = True  # 确认水平线
             self.repaint()
 
+    def rotate_image(self, angle):
+        if self.pixmap:
+            self.rotation_angle = (self.rotation_angle + angle) % 360
+            self.repaint()
+
+    def start_manual_rotation(self):
+        if self.pixmap:
+            self.is_rotating = True
+            self.setCursor(Qt.OpenHandCursor)
+
+    def stop_manual_rotation(self):
+        self.is_rotating = False
+        self.setCursor(Qt.ArrowCursor)
+        self.repaint()
+
+    def start_crop(self):
+        if self.pixmap:
+            self.is_cropping = True
+            self.crop_rect = QRect()
+            self.repaint()
+
+    def crop_image(self):
+        if self.pixmap and not self.crop_rect.isNull():
+            # 计算实际裁剪区域
+            crop_rect = self.crop_rect.normalized()
+            self.pixmap = self.pixmap.copy(crop_rect)
+            self.original_pixmap = self.pixmap.copy()
+            # 更新标注位置
+            new_annotations = []
+            for annotation in self.annotations:
+                aid, text, pos, annotation_type, color = annotation
+                new_pos = QPointF(pos.x() - crop_rect.left(), pos.y() - crop_rect.top())
+                new_annotations.append((aid, text, new_pos, annotation_type, color))
+            self.annotations = new_annotations
+            if self.id_annotation:
+                text, pos = self.id_annotation
+                new_pos = QPointF(pos.x() - crop_rect.left(), pos.y() - crop_rect.top())
+                self.id_annotation = (text, new_pos)
+            self.is_cropping = False
+            self.crop_rect = QRect()
+            self.repaint()
+            self.annotations_changed.emit()
+
+    def get_scaled_rect(self):
+        label_rect = self.rect()
+        scaled_pixmap = self.pixmap.scaled(label_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        draw_rect = scaled_pixmap.rect()
+        draw_rect.moveCenter(label_rect.center())
+        return draw_rect
+
     def paintEvent(self, event):
         super().paintEvent(event)
         if self.pixmap:
@@ -115,6 +223,12 @@ class ImageLabel(QLabel):
 
             # 缩放图像以适应标签大小
             scaled_pixmap = self.pixmap.scaled(label_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            # 应用旋转变换
+            transform = QTransform()
+            transform.translate(label_rect.width() / 2, label_rect.height() / 2)
+            transform.rotate(self.rotation_angle)
+            transform.translate(-label_rect.width() / 2, -label_rect.height() / 2)
+            painter.setTransform(transform)
             draw_rect = scaled_pixmap.rect()
             draw_rect.moveCenter(label_rect.center())
             painter.drawPixmap(draw_rect.topLeft(), scaled_pixmap)
@@ -123,23 +237,33 @@ class ImageLabel(QLabel):
             scale_factor = draw_rect.width() / self.pixmap.width()
 
             # 绘制注释
-            for annotation, pos, annotation_type in self.annotations:
+            for annotation_id, annotation, pos, annotation_type, color in self.annotations:
                 if annotation_type == 'normal':
-                    pen_color = self.text_color
+                    pen_color = color
                     font_size = int(self.text_size * scale_factor)
-                elif annotation_type == 'id':
-                    pen_color = self.id_color
-                    font_size = int(self.id_text_size * scale_factor)
                 else:
-                    pen_color = self.text_color
-                    font_size = int(self.text_size * scale_factor)
+                    continue  # 忽略其他类型
 
                 painter.setPen(QPen(pen_color, 3))
                 font = QFont('Arial', font_size)
                 painter.setFont(font)
-                draw_x = int(pos.x() * scale_factor) + draw_rect.left()
-                draw_y = int(pos.y() * scale_factor) + draw_rect.top()
+                transformed_pos = self.inverse_transform_point(pos)
+                draw_x = int(transformed_pos.x() * scale_factor) + draw_rect.left()
+                draw_y = int(transformed_pos.y() * scale_factor) + draw_rect.top()
                 painter.drawText(draw_x, draw_y, annotation)
+
+            # 绘制ID标注
+            if self.id_annotation is not None:
+                annotation_text, pos = self.id_annotation
+                pen_color = self.id_color
+                font_size = int(self.id_text_size * scale_factor)
+                painter.setPen(QPen(pen_color, 3))
+                font = QFont('Arial', font_size)
+                painter.setFont(font)
+                transformed_pos = self.inverse_transform_point(pos)
+                draw_x = int(transformed_pos.x() * scale_factor) + draw_rect.left()
+                draw_y = int(transformed_pos.y() * scale_factor) + draw_rect.top()
+                painter.drawText(draw_x, draw_y, annotation_text)
 
             # 绘制固定水平线
             if self.fixed_y_mark_position is not None:
@@ -148,31 +272,79 @@ class ImageLabel(QLabel):
                 y_pos_scaled = int(self.fixed_y_mark_position * scale_factor) + draw_rect.top()
                 painter.drawLine(draw_rect.left(), y_pos_scaled, draw_rect.right(), y_pos_scaled)
 
+            # 绘制裁剪矩形
+            if self.is_cropping and not self.crop_rect.isNull():
+                painter.setPen(QPen(Qt.blue, 2, Qt.DashLine))
+                painter.drawRect(self.crop_rect)
+
     def mousePressEvent(self, event):
         if self.pixmap and event.button() == Qt.LeftButton:
-            pos = event.pos()
-            label_rect = self.rect()
-            scaled_pixmap = self.pixmap.scaled(label_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            scaled_width = scaled_pixmap.width()
-            scaled_height = scaled_pixmap.height()
-            offset_x = (label_rect.width() - scaled_width) / 2
-            offset_y = (label_rect.height() - scaled_height) / 2
+            if self.is_rotating:
+                self.last_mouse_pos = event.pos()
+            elif self.is_cropping:
+                self.start_crop_pos = event.pos()
+                self.crop_rect = QRect(self.start_crop_pos, QSize())
+            else:
+                pos = event.pos()
+                label_rect = self.rect()
+                scaled_pixmap = self.pixmap.scaled(label_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled_width = scaled_pixmap.width()
+                scaled_height = scaled_pixmap.height()
+                offset_x = (label_rect.width() - scaled_width) / 2
+                offset_y = (label_rect.height() - scaled_height) / 2
 
-            if (offset_x <= pos.x() <= offset_x + scaled_width) and (offset_y <= pos.y() <= offset_y + scaled_height):
-                adjusted_x = int((pos.x() - offset_x) * self.pixmap.width() / scaled_width)
-                adjusted_y = int((pos.y() - offset_y) * self.pixmap.height() / scaled_height)
+                if (offset_x <= pos.x() <= offset_x + scaled_width) and (offset_y <= pos.y() <= offset_y + scaled_height):
+                    adjusted_x = int((pos.x() - offset_x) * self.pixmap.width() / scaled_width)
+                    adjusted_y = int((pos.y() - offset_y) * self.pixmap.height() / scaled_height)
 
-                if self.is_id_mode:
-                    # 如果处于ID绘制模式，只绘制ID
-                    self.id_position = QPoint(adjusted_x, adjusted_y)
-                    self.add_annotation(self.id_position, annotation_type='id')
-                else:
-                    # 普通标注模式下绘制标注文字
                     if self.fixed_y_mode and not self.is_fixed_y_confirmed:
-                        # 当水平线未确认时，设置新的Y坐标并显示水平线
+                        # 确认水平线位置
                         self.set_fixed_y_position(adjusted_y)
+                        self.confirm_fixed_y_position()
+                    elif self.is_id_mode:
+                        # 如果处于ID绘制模式，移动ID位置
+                        self.id_position = QPointF(adjusted_x, adjusted_y)
+                        self.id_annotation = (self.id_text, self.id_position)
+                        self.annotations_changed.emit()
+                        self.repaint()
                     else:
-                        self.add_annotation(QPoint(adjusted_x, adjusted_y), annotation_type='normal')
+                        # 普通标注模式下绘制标注文字
+                        self.add_annotation(QPointF(adjusted_x, adjusted_y), annotation_type='normal')
+
+    def mouseMoveEvent(self, event):
+        if self.pixmap:
+            if self.is_rotating:
+                # 计算旋转角度
+                current_pos = event.pos()
+                center = QPointF(self.rect().width() / 2, self.rect().height() / 2)
+                angle1 = math.degrees(math.atan2(self.last_mouse_pos.y() - center.y(), self.last_mouse_pos.x() - center.x()))
+                angle2 = math.degrees(math.atan2(current_pos.y() - center.y(), current_pos.x() - center.x()))
+                delta_angle = angle2 - angle1
+                self.rotation_angle = (self.rotation_angle + delta_angle) % 360
+                self.last_mouse_pos = current_pos
+                self.repaint()
+            elif self.is_cropping and self.start_crop_pos:
+                self.crop_rect = QRect(self.start_crop_pos, event.pos()).normalized()
+                self.repaint()
+            elif self.fixed_y_mode and not self.is_fixed_y_confirmed:
+                pos = event.pos()
+                label_rect = self.rect()
+                scaled_pixmap = self.pixmap.scaled(label_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled_width = scaled_pixmap.width()
+                scaled_height = scaled_pixmap.height()
+                offset_x = (label_rect.width() - scaled_width) / 2
+                offset_y = (label_rect.height() - scaled_height) / 2
+
+                if (offset_x <= pos.x() <= offset_x + scaled_width) and (offset_y <= pos.y() <= offset_y + scaled_height):
+                    adjusted_y = int((pos.y() - offset_y) * self.pixmap.height() / scaled_height)
+                    self.fixed_y_mark_position = adjusted_y
+                    self.repaint()
+
+    def mouseReleaseEvent(self, event):
+        if self.is_rotating and event.button() == Qt.LeftButton:
+            self.stop_manual_rotation()
+        if self.is_cropping and event.button() == Qt.LeftButton:
+            self.start_crop_pos = None
 
     def save_image(self, save_path):
         if not self.pixmap:
@@ -185,22 +357,42 @@ class ImageLabel(QLabel):
         painter = QPainter(pixmap_copy)
         painter.drawPixmap(0, 0, self.pixmap)
 
+        # 应用旋转变换
+        transform = QTransform()
+        transform.translate(self.pixmap.width() / 2, self.pixmap.height() / 2)
+        transform.rotate(self.rotation_angle)
+        transform.translate(-self.pixmap.width() / 2, -self.pixmap.height() / 2)
+        painter.setTransform(transform)
+
         # 绘制注释
-        for annotation, pos, annotation_type in self.annotations:
+        for annotation_id, annotation, pos, annotation_type, color in self.annotations:
             if annotation_type == 'normal':
-                pen_color = self.text_color
+                pen_color = color
                 font_size = self.text_size
-            elif annotation_type == 'id':
-                pen_color = self.id_color
-                font_size = self.id_text_size
             else:
-                pen_color = self.text_color
-                font_size = self.text_size
+                continue  # 忽略其他类型
 
             painter.setPen(QPen(pen_color, 3))
             font = QFont('Arial', font_size)
             painter.setFont(font)
             painter.drawText(pos, annotation)
+
+        # 绘制ID标注
+        if self.id_annotation is not None:
+            annotation_text, pos = self.id_annotation
+            pen_color = self.id_color
+            font_size = self.id_text_size
+            painter.setPen(QPen(pen_color, 3))
+            font = QFont('Arial', font_size)
+            painter.setFont(font)
+            painter.drawText(pos, annotation_text)
+
+        # 绘制固定水平线（如果需要）
+        if self.fixed_y_mark_position is not None:
+            pen_color = Qt.red if not self.is_fixed_y_confirmed else Qt.green
+            painter.setPen(QPen(pen_color, 2, Qt.DashLine))
+            y_pos = self.fixed_y_mark_position
+            painter.drawLine(0, y_pos, self.pixmap.width(), y_pos)
 
         painter.end()
 
@@ -209,15 +401,13 @@ class ImageLabel(QLabel):
         else:
             QMessageBox.critical(self, "保存失败", f"无法保存图片至 {save_path}")
 
+
 class ImageAnnotator(QMainWindow):
     def __init__(self):
         super().__init__()
 
         self.setWindowTitle("Image Annotator")
         self.setGeometry(100, 100, 1600, 1000)  # 增加窗口大小
-
-        # 设置应用程序图标（可选）
-        # self.setWindowIcon(QIcon('icons/icon.png'))  # 不使用图标，可以注释掉或移除
 
         self.central_widget = QWidget(self)
         self.setCentralWidget(self.central_widget)
@@ -274,21 +464,26 @@ class ImageAnnotator(QMainWindow):
         self.undo_button.setShortcut("Ctrl+Z")
         grid.addWidget(self.undo_button, 1, 0, 1, 2)
 
-        # 设置颜色按钮和大小选择
-        self.color_button = QPushButton("设置颜色")
-        self.color_button.setToolTip("设置标注颜色")
+        # 设置当前标注颜色按钮
+        self.color_button = QPushButton("设置当前标注颜色")
+        self.color_button.setToolTip("设置当前标注颜色")
+        grid.addWidget(self.color_button, 2, 0, 1, 2)
+
+        # 标注字体大小
         self.size_spinbox = QSpinBox()
-        self.size_spinbox.setRange(10, 100)
+        self.size_spinbox.setRange(1, 10000)  # 设置一个非常大的上限
         self.size_spinbox.setValue(20)
         self.size_spinbox.setToolTip("设置标注字体大小")
-        grid.addWidget(self.color_button, 2, 0)
-        grid.addWidget(QLabel("字体大小:"), 2, 1)
-        grid.addWidget(self.size_spinbox, 2, 2)
+        self.size_confirm_button = QPushButton("确定")
+        self.size_confirm_button.setToolTip("确定字体大小")
+        grid.addWidget(QLabel("字体大小:"), 3, 0)
+        grid.addWidget(self.size_spinbox, 3, 1)
+        grid.addWidget(self.size_confirm_button, 3, 2)
 
         # 设置标注前缀按钮
         self.prefix_button = QPushButton("设置前缀")
         self.prefix_button.setToolTip("设置标注前缀")
-        grid.addWidget(self.prefix_button, 3, 0, 1, 2)
+        grid.addWidget(self.prefix_button, 4, 0, 1, 2)
 
         # ID设置组
         self.id_group = QGroupBox("ID设置")
@@ -299,23 +494,28 @@ class ImageAnnotator(QMainWindow):
         self.add_id_button.setToolTip("添加ID标注 (Ctrl+I)")
         self.add_id_button.setShortcut("Ctrl+I")
         self.id_size_spinbox = QSpinBox()
-        self.id_size_spinbox.setRange(10, 100)
+        self.id_size_spinbox.setRange(1, 10000)
         self.id_size_spinbox.setValue(20)
         self.id_size_spinbox.setToolTip("设置ID字体大小")
+        self.id_size_confirm_button = QPushButton("确定")
+        self.id_size_confirm_button.setToolTip("确定ID字体大小")
         self.id_color_button = QPushButton("设置ID颜色")
         self.id_color_button.setToolTip("设置ID标注颜色")
         self.end_id_button = QPushButton("结束ID绘制 (Ctrl+E)")
         self.end_id_button.setToolTip("结束ID绘制模式")
         self.end_id_button.setShortcut("Ctrl+E")
-        
+        self.delete_id_button = QPushButton("删除ID")
+        self.delete_id_button.setToolTip("删除ID标注")
         id_layout.addWidget(self.id_input)
         id_layout.addWidget(self.add_id_button)
         id_layout.addWidget(QLabel("ID字体大小:"))
         id_layout.addWidget(self.id_size_spinbox)
+        id_layout.addWidget(self.id_size_confirm_button)
         id_layout.addWidget(self.id_color_button)
+        id_layout.addWidget(self.delete_id_button)
         id_layout.addWidget(self.end_id_button)
         self.id_group.setLayout(id_layout)
-        grid.addWidget(self.id_group, 4, 0, 1, 2)
+        grid.addWidget(self.id_group, 5, 0, 1, 2)
 
         # 固定水平绘制相关按钮
         self.fixed_y_group = QGroupBox("固定水平绘制")
@@ -326,9 +526,6 @@ class ImageAnnotator(QMainWindow):
         self.start_fixed_y_button.setToolTip("开始固定水平绘制模式")
         self.start_fixed_y_button.setShortcut("Ctrl+F")
 
-        self.confirm_fixed_y_button = QPushButton("确定水平线 (Ctrl+C)")
-        self.confirm_fixed_y_button.setToolTip("确定当前水平线位置")
-        self.confirm_fixed_y_button.setShortcut("Ctrl+C")
         self.modify_fixed_y_button = QPushButton("修改水平线 (Ctrl+M)")
         self.modify_fixed_y_button.setToolTip("修改固定水平线位置")
         self.modify_fixed_y_button.setShortcut("Ctrl+M")
@@ -336,23 +533,51 @@ class ImageAnnotator(QMainWindow):
         self.close_fixed_y_button.setToolTip("关闭固定水平绘制模式")
         self.close_fixed_y_button.setShortcut("Ctrl+Q")
         fixed_y_layout.addWidget(self.start_fixed_y_button)
-        fixed_y_layout.addWidget(self.confirm_fixed_y_button)
         fixed_y_layout.addWidget(self.modify_fixed_y_button)
         fixed_y_layout.addWidget(self.close_fixed_y_button)
         self.fixed_y_group.setLayout(fixed_y_layout)
-        grid.addWidget(self.fixed_y_group, 5, 0, 1, 2)
+        grid.addWidget(self.fixed_y_group, 6, 0, 1, 2)
+
+        # 旋转和裁剪功能
+        self.rotate_left_button = QPushButton("左旋转")
+        self.rotate_left_button.setToolTip("向左旋转图片")
+        self.rotate_right_button = QPushButton("右旋转")
+        self.rotate_right_button.setToolTip("向右旋转图片")
+        self.manual_rotate_button = QPushButton("手动旋转")
+        self.manual_rotate_button.setToolTip("手动旋转图片")
+        self.start_crop_button = QPushButton("开始裁剪")
+        self.start_crop_button.setToolTip("开始裁剪模式")
+        self.crop_button = QPushButton("裁剪")
+        self.crop_button.setToolTip("执行裁剪")
+        grid.addWidget(self.rotate_left_button, 7, 0)
+        grid.addWidget(self.rotate_right_button, 7, 1)
+        grid.addWidget(self.manual_rotate_button, 8, 0)
+        grid.addWidget(self.start_crop_button, 9, 0)
+        grid.addWidget(self.crop_button, 9, 1)
 
         # 当前模式标签
         self.mode_label = QLabel("当前模式：普通标注")
         self.mode_label.setFont(QFont('Arial', 12, QFont.Bold))
         self.mode_label.setAlignment(Qt.AlignCenter)
-        grid.addWidget(self.mode_label, 6, 0, 1, 2)
+        grid.addWidget(self.mode_label, 10, 0, 1, 2)
 
         # 保存图片按钮
         self.save_button = QPushButton("保存图片 (Ctrl+P)")
         self.save_button.setToolTip("保存当前标注的图片")
         self.save_button.setShortcut("Ctrl+P")
-        grid.addWidget(self.save_button, 7, 0, 1, 2)
+        grid.addWidget(self.save_button, 11, 0, 1, 2)
+
+        # 标注列表组
+        self.annotations_group = QGroupBox("标注列表")
+        annotations_layout = QVBoxLayout()
+        self.annotations_list = QListWidget()
+        annotations_layout.addWidget(self.annotations_list)
+        self.change_annotation_color_button = QPushButton("更改标注颜色")
+        self.delete_annotation_button = QPushButton("删除选中标注")
+        annotations_layout.addWidget(self.change_annotation_color_button)
+        annotations_layout.addWidget(self.delete_annotation_button)
+        self.annotations_group.setLayout(annotations_layout)
+        grid.addWidget(self.annotations_group, 12, 0, 1, 2)
 
         # 添加网格布局到控制面板
         self.control_layout.addLayout(grid)
@@ -362,18 +587,26 @@ class ImageAnnotator(QMainWindow):
         self.open_button.clicked.connect(self.open_file_or_folder)
         self.undo_button.clicked.connect(self.undo_annotation)
         self.save_button.clicked.connect(self.save_image)
-        self.color_button.clicked.connect(self.choose_color)
-        self.size_spinbox.valueChanged.connect(self.set_text_size)
+        self.color_button.clicked.connect(self.choose_current_annotation_color)
+        self.size_confirm_button.clicked.connect(self.set_text_size)
         self.prefix_button.clicked.connect(self.set_prefix)
         self.thumbnail_list.itemClicked.connect(self.load_selected_image)
         self.add_id_button.clicked.connect(self.add_id)
-        self.id_size_spinbox.valueChanged.connect(self.set_id_text_size)
+        self.id_size_confirm_button.clicked.connect(self.set_id_text_size)
         self.id_color_button.clicked.connect(self.choose_id_color)
         self.start_fixed_y_button.clicked.connect(self.start_fixed_y_mode)
-        self.confirm_fixed_y_button.clicked.connect(self.confirm_fixed_y)
         self.modify_fixed_y_button.clicked.connect(self.modify_fixed_y_mode)
         self.close_fixed_y_button.clicked.connect(self.close_fixed_y_mode)
         self.end_id_button.clicked.connect(self.end_id_mode)
+        self.delete_id_button.clicked.connect(self.delete_id)
+        self.delete_annotation_button.clicked.connect(self.delete_selected_annotation)
+        self.change_annotation_color_button.clicked.connect(self.change_selected_annotation_color)
+        self.rotate_left_button.clicked.connect(self.rotate_left)
+        self.rotate_right_button.clicked.connect(self.rotate_right)
+        self.manual_rotate_button.clicked.connect(self.start_manual_rotate)
+        self.start_crop_button.clicked.connect(self.start_crop)
+        self.crop_button.clicked.connect(self.crop_image)
+        self.image_label.annotations_changed.connect(self.update_annotations_list)
 
     def apply_styles(self):
         self.setStyleSheet("""
@@ -392,6 +625,9 @@ class ImageAnnotator(QMainWindow):
             }
             QPushButton:hover {
                 background-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #3e8e41;
             }
             QGroupBox {
                 font-weight: bold;
@@ -420,27 +656,42 @@ class ImageAnnotator(QMainWindow):
 
     def open_file_or_folder(self):
         options = QFileDialog.Options()
-        try:
-            # 允许用户选择多个文件或一个文件夹
+        options |= QFileDialog.DontUseNativeDialog
+
+        # 询问用户选择打开文件还是文件夹
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("选择文件或文件夹")
+        msg_box.setText("请选择打开方式：")
+        open_files_button = msg_box.addButton("打开文件", QMessageBox.AcceptRole)
+        open_folder_button = msg_box.addButton("打开文件夹", QMessageBox.AcceptRole)
+        cancel_button = msg_box.addButton("取消", QMessageBox.RejectRole)
+        msg_box.exec_()
+
+        if msg_box.clickedButton() == open_files_button:
             files, _ = QFileDialog.getOpenFileNames(
-                self, "选择图片或文件夹", "",
+                self, "选择图片文件", "",
                 "Image Files (*.png *.jpg *.jpeg *.bmp *.gif);;All Files (*)",
                 options=options
             )
             if files:
-                # 检查是否选择的是一个文件夹
-                if len(files) == 1 and os.path.isdir(files[0]):
-                    folder = files[0]
-                    self.load_images_from_folder(folder)
-                else:
-                    self.image_paths = files
-                    self.populate_thumbnail_list(self.image_paths)
-                    if self.image_paths:
-                        self.load_image(self.image_paths[0])
+                self.image_paths = files
+                self.populate_thumbnail_list(self.image_paths)
+                if self.image_paths:
+                    self.load_image(self.image_paths[0])
             else:
-                QMessageBox.information(self, "没有选择文件", "请选择一个文件或文件夹。")
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"打开文件或文件夹时出错：{str(e)}")
+                QMessageBox.information(self, "没有选择文件", "请选择一个或多个图片文件。")
+        elif msg_box.clickedButton() == open_folder_button:
+            folder = QFileDialog.getExistingDirectory(
+                self, "选择包含图片的文件夹", "",
+                options=options
+            )
+            if folder:
+                self.load_images_from_folder(folder)
+            else:
+                QMessageBox.information(self, "没有选择文件夹", "请选择一个包含图片的文件夹。")
+        else:
+            # 用户点击取消
+            pass
 
     def load_images_from_folder(self, folder):
         self.image_paths = []
@@ -489,14 +740,16 @@ class ImageAnnotator(QMainWindow):
             if save_path:
                 self.image_label.save_image(save_path)
                 self.status_bar.showMessage(f"图片已保存至 {save_path}", 5000)
+            else:
+                QMessageBox.warning(self, "保存失败", "未指定保存路径。")
         else:
             QMessageBox.warning(self, "保存失败", "没有加载任何图片。")
 
-    def choose_color(self):
+    def choose_current_annotation_color(self):
         color = QColorDialog.getColor()
         if color.isValid():
-            self.image_label.set_text_color(color)
-            self.status_bar.showMessage(f"标注颜色已设置为: {color.name()}", 3000)
+            self.image_label.set_current_annotation_color(color)
+            self.status_bar.showMessage(f"当前标注颜色已设置为: {color.name()}", 3000)
 
     def set_text_size(self):
         size = self.size_spinbox.value()
@@ -547,13 +800,6 @@ class ImageAnnotator(QMainWindow):
         else:
             QMessageBox.information(self, "已在固定模式", "当前已处于固定水平绘制模式。")
 
-    def confirm_fixed_y(self):
-        if self.image_label.fixed_y_mark_position is not None:
-            self.image_label.confirm_fixed_y_position()
-            self.status_bar.showMessage("固定水平线已确认", 3000)
-        else:
-            QMessageBox.warning(self, "未设置水平线", "请先点击图像设置固定水平线的位置。")
-
     def modify_fixed_y_mode(self):
         if self.image_label.fixed_y_mode:
             # 允许修改水平线
@@ -579,22 +825,101 @@ class ImageAnnotator(QMainWindow):
         else:
             QMessageBox.warning(self, "未开启ID模式", "当前未处于ID绘制模式。")
 
+    def delete_id(self):
+        if self.image_label.id_annotation is not None:
+            self.image_label.id_annotation = None
+            self.image_label.id_position = None
+            self.image_label.repaint()
+            self.update_annotations_list()
+            self.status_bar.showMessage("ID标注已删除", 3000)
+        else:
+            QMessageBox.warning(self, "没有ID标注", "当前没有ID标注可以删除。")
+
+    def update_annotations_list(self):
+        self.annotations_list.clear()
+        # 添加普通标注
+        for annotation_id, text, pos, annotation_type, color in self.image_label.annotations:
+            if annotation_type == 'normal':
+                item_text = f"{text} at ({pos.x():.1f}, {pos.y():.1f})"
+                item = QListWidgetItem(item_text)
+                item.setData(Qt.UserRole, annotation_id)
+                self.annotations_list.addItem(item)
+        # 添加ID标注
+        if self.image_label.id_annotation is not None:
+            text, pos = self.image_label.id_annotation
+            item_text = f"ID: {text} at ({pos.x():.1f}, {pos.y():.1f})"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, 'id')
+            self.annotations_list.addItem(item)
+
+    def delete_selected_annotation(self):
+        selected_items = self.annotations_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "未选择标注", "请先在标注列表中选择要删除的标注。")
+            return
+        for item in selected_items:
+            annotation_id = item.data(Qt.UserRole)
+            if annotation_id == 'id':
+                # 删除ID标注
+                self.image_label.id_annotation = None
+                self.image_label.id_position = None
+            else:
+                # 删除普通标注
+                for i, (aid, text, pos, annotation_type, color) in enumerate(self.image_label.annotations):
+                    if aid == annotation_id:
+                        del self.image_label.annotations[i]
+                        break
+        self.image_label.repaint()
+        self.update_annotations_list()
+        self.status_bar.showMessage("选中的标注已删除", 3000)
+
+    def change_selected_annotation_color(self):
+        selected_items = self.annotations_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "未选择标注", "请先在标注列表中选择要更改颜色的标注。")
+            return
+        color = QColorDialog.getColor()
+        if color.isValid():
+            for item in selected_items:
+                annotation_id = item.data(Qt.UserRole)
+                for i, (aid, text, pos, annotation_type, _) in enumerate(self.image_label.annotations):
+                    if aid == annotation_id:
+                        self.image_label.annotations[i] = (aid, text, pos, annotation_type, color)
+                        break
+            self.image_label.repaint()
+            self.status_bar.showMessage("选中标注的颜色已更改", 3000)
+
+    def rotate_left(self):
+        self.image_label.rotate_image(-90)
+        self.status_bar.showMessage("图片已左旋转90度", 3000)
+
+    def rotate_right(self):
+        self.image_label.rotate_image(90)
+        self.status_bar.showMessage("图片已右旋转90度", 3000)
+
+    def start_manual_rotate(self):
+        self.image_label.start_manual_rotation()
+        self.status_bar.showMessage("进入手动旋转模式，拖动鼠标旋转图片", 3000)
+        self.mode_label.setText("当前模式：手动旋转")
+
+    def start_crop(self):
+        self.image_label.start_crop()
+        self.status_bar.showMessage("进入裁剪模式，请拖动鼠标选择裁剪区域", 3000)
+
+    def crop_image(self):
+        if self.image_label.is_cropping:
+            self.image_label.crop_image()
+            self.status_bar.showMessage("图片已裁剪", 3000)
+        else:
+            QMessageBox.warning(self, "未进入裁剪模式", "请先点击“开始裁剪”按钮进入裁剪模式。")
+
+
 def main():
     app = QApplication(sys.argv)
     main_window = ImageAnnotator()
     main_window.show()
     sys.exit(app.exec_())
 
+
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
