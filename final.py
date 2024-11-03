@@ -20,6 +20,7 @@ import tarfile  # For .tgz files
 import tempfile
 import shutil  # To remove temp folder
 from PIL import Image as PILImage  # 使用PIL来获取图片的宽高
+rarfile.UNRAR_TOOL = "D:/WinRar/UnRAR.exe"
 
 
 class ImageLabel(QLabel):
@@ -447,7 +448,7 @@ class DecompressRenameWindow(QMainWindow):
         layout = QVBoxLayout()
         self.select_file_button = QPushButton("选择压缩文件")
         self.prefix_input = QLineEdit()
-        self.prefix_input.setPlaceholderText("输入文件名前缀，默认：BRSF10")
+        self.prefix_input.setPlaceholderText("输入文件前缀，默认：BRSF10")
         self.process_button = QPushButton("解压并改名")
         self.progress_label = QLabel("")
         self.progress_bar = QProgressBar()
@@ -471,10 +472,10 @@ class DecompressRenameWindow(QMainWindow):
     def select_file(self):
         options = QFileDialog.Options()
         file, _ = QFileDialog.getOpenFileName(
-            self, 
-            "选择压缩文件", 
-            "", 
-            "Compressed Files (*.zip *.7z *.rar *.tgz);;All Files (*)",  # Updated to include .zip, .7z, .rar, .tgz files
+            self,
+            "选择压缩文件",
+            "",
+            "Compressed Files (*.zip *.7z *.rar *.tgz);;All Files (*)",
             options=options
         )
         if file:
@@ -491,7 +492,7 @@ class DecompressRenameWindow(QMainWindow):
 
             base_name = os.path.splitext(os.path.basename(self.selected_file))[0]
             final_dir_base = os.path.join(os.path.dirname(self.selected_file), f"{base_name}-解压修改")
-            final_dir=final_dir_base
+            final_dir = final_dir_base
             counter = 1
             while os.path.exists(final_dir):
                 final_dir = f"{final_dir_base}{counter}"
@@ -523,17 +524,18 @@ class DecompressRenameWindow(QMainWindow):
                     new_path = os.path.join(final_dir, new_name)
 
                     try:
+                        # 打开图片
                         image = Image.open(image_path)
-                        original_format = image.format.lower()
 
-                        # 如果图片不是 .jpg 格式，转换为 .jpg
-                        if original_format != 'jpeg':
+                        # 如果图片格式不是 JPEG，则转换为 JPEG
+                        if image.format.lower() != 'jpeg':
                             image = image.convert('RGB')
-                        image.save(new_path, format='JPEG', quality=95)
-                        self.adjust_image_size(new_path)
 
-                        # 处理完成后删除临时文件
-                        os.remove(image_path)
+                        # 保存为 JPEG，使用较高质量参数以尽量减少损失
+                        image.save(new_path, format='JPEG', quality=95)
+
+                        # 调整图片大小（只在必要时），确保不超过800KB
+                        self.adjust_image_size(new_path)
 
                         self.progress_label.setText(f"处理文件: {new_name}")
                         self.progress_bar.setValue(index + 1)
@@ -547,17 +549,17 @@ class DecompressRenameWindow(QMainWindow):
             QMessageBox.critical(self, "意外错误", f"解压和重命名过程中出现意外错误：{str(e)}")
 
     def adjust_image_size(self, image_path):
-        """Adjust the image size to be less than or equal to 800KB if needed."""
+        """只在图片大小超过800KB时调整图片质量，以便减小文件大小。"""
         max_size_kb = 800
         image_size_kb = os.path.getsize(image_path) / 1024  # Get size in KB
 
         if image_size_kb > max_size_kb:
-            quality = 95
-            while image_size_kb > max_size_kb and quality > 10:
-                quality -= 5
-                with Image.open(image_path) as img:
+            quality = 90  # 开始的压缩质量参数，尽量保持高质量
+            with Image.open(image_path) as img:
+                while image_size_kb > max_size_kb and quality > 10:
+                    quality -= 5
                     img.save(image_path, format='JPEG', quality=quality)
-                image_size_kb = os.path.getsize(image_path) / 1024
+                    image_size_kb = os.path.getsize(image_path) / 1024
 
     def extract_zip(self, extract_dir):
         with zipfile.ZipFile(self.selected_file, 'r') as zip_ref:
